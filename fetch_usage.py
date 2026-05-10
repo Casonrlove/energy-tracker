@@ -3,15 +3,17 @@ import csv
 import json
 import logging
 import smtplib
+import ssl
 import sys
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
 
 import aiohttp
+import certifi
 import pytz
 
-from smart_meter_texas import Account, Client, ClientSSLContext
+from smart_meter_texas import Account, Client
 from smart_meter_texas.const import INTERVAL_SYNCH
 from energy_usage import generate_report
 
@@ -127,7 +129,8 @@ async def main():
         sys.exit(1)
 
     existing_dates = get_existing_dates()
-    ssl_ctx = await ClientSSLContext().get_ssl_context()
+    ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+    ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     new_rows = []
 
     timeout = aiohttp.ClientTimeout(total=30)
