@@ -12,10 +12,13 @@ import aiohttp
 import pytz
 
 from smart_meter_texas import Account, Client, ClientSSLContext
+from smart_meter_texas.const import INTERVAL_SYNCH
 from energy_usage import generate_report
 
+BACKFILL_DAYS = 35
+
 CONFIG_PATH = Path("~/.smt_config.json").expanduser()
-CSV_PATH = Path("~/Github/energy-tracker/Daily_Data.csv").expanduser()
+CSV_PATH = Path(__file__).resolve().parent / "Daily_Data.csv"
 TIMEZONE = pytz.timezone("America/Chicago")
 
 logging.basicConfig(
@@ -71,19 +74,53 @@ def send_email(cfg, subject, body):
         log.warning("Gmail app password not configured, skipping email.")
         return
 
+    recipients = [r.strip() for r in email_to.split(",") if r.strip()]
+
     msg = MIMEText(body, "plain")
     msg["Subject"] = subject
     msg["From"] = gmail_user
-    msg["To"] = email_to
+    msg["To"] = ", ".join(recipients)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(gmail_user, gmail_pw)
-        server.sendmail(gmail_user, email_to, msg.as_string())
+        server.sendmail(gmail_user, recipients, msg.as_string())
 
-    log.info(f"Email sent to {email_to}.")
+    log.info(f"Email sent to {', '.join(recipients)}.")
+
+
+async def fetch_daily_kwh(client, esiid, date_str):
+    """Query the intervalsynch endpoint and sum 15-min consumption into a daily total."""
+    resp = await client.request(
+        INTERVAL_SYNCH,
+        json={
+            "startDate": date_str,
+            "endDate": date_str,
+            "reportFormat": "JSON",
+            "ESIID": [esiid],
+            "versionDate": None,
+            "readDate": None,
+            "versionNum": None,
+            "dataType": None,
+        },
+    )
+    data = resp.get("data") or {}
+    if data.get("errorCode") and data.get("errorCode") != "0":
+        raise RuntimeError(f"SMT error: {data.get('errorMessage')}")
+    total = 0.0
+    for entry in data.get("energyData") or []:
+        if entry.get("RT") != "C":
+            continue
+        for chunk in (entry.get("RD") or "").split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            total += float(chunk.split("-")[0])
+    return total
 
 
 async def main():
+    no_email = "--no-email" in sys.argv
+
     cfg = load_config()
     if cfg["username"] == "YOUR_SMT_USERNAME":
         print("Please edit ~/.smt_config.json with your Smart Meter Texas credentials.")
@@ -93,7 +130,8 @@ async def main():
     ssl_ctx = await ClientSSLContext().get_ssl_context()
     new_rows = []
 
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         account = Account(cfg["username"], cfg["password"])
         client = Client(session, account, ssl_ctx)
 
@@ -108,7 +146,7 @@ async def main():
             esiid = meter.esiid
             log.info(f"Fetching data for ESIID {esiid}...")
 
-            for days_back in range(1, 8):
+            for days_back in range(1, BACKFILL_DAYS + 1):
                 target_date = datetime.now(TIMEZONE).date() - timedelta(days=days_back)
                 date_str = target_date.strftime("%m/%d/%Y")
 
@@ -117,32 +155,29 @@ async def main():
                     continue
 
                 try:
-                    intervals = await meter.get_15min(client, prevdays=days_back)
-                    if intervals:
-                        total_kwh = sum(float(v) for _, v in intervals if v)
-                        if total_kwh > 0:
-                            append_row(esiid, date_str, total_kwh)
-                            new_rows.append((date_str, total_kwh))
-                            log.info(f"  Added {date_str}: {total_kwh:.3f} kWh")
-                        else:
-                            log.info(f"  {date_str}: no usage data available yet.")
+                    total_kwh = await fetch_daily_kwh(client, esiid, date_str)
+                    if total_kwh > 0:
+                        append_row(esiid, date_str, total_kwh)
+                        new_rows.append((date_str, total_kwh))
+                        log.info(f"  Added {date_str}: {total_kwh:.3f} kWh")
                     else:
-                        log.info(f"  {date_str}: no interval data returned.")
+                        log.info(f"  {date_str}: no usage data available yet.")
                 except Exception as e:
                     log.warning(f"  {date_str}: failed to fetch ({e})")
 
-    # Generate report and email it
+    # Generate and print report
     report = generate_report()
-    today_str = datetime.now(TIMEZONE).strftime("%m/%d/%Y")
+    print(report)
 
-    if new_rows:
-        added_summary = "\n".join(f"  {d}: {k:.1f} kWh" for d, k in new_rows)
-        email_body = f"New data added:\n{added_summary}\n\n{report}"
-    else:
-        email_body = f"No new data today.\n\n{report}"
-
-    send_email(cfg, f"Energy Report - {today_str}", email_body)
-    log.info("Done.")
+    # Email unless --no-email
+    if not no_email:
+        today_str = datetime.now(TIMEZONE).strftime("%m/%d/%Y")
+        if new_rows:
+            added_summary = "\n".join(f"  {d}: {k:.1f} kWh" for d, k in new_rows)
+            email_body = f"New data added:\n{added_summary}\n\n{report}"
+        else:
+            email_body = f"No new data today.\n\n{report}"
+        send_email(cfg, f"Energy Report - {today_str}", email_body)
 
 
 if __name__ == "__main__":
