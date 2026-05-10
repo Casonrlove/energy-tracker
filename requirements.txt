@@ -1,3 +1,8 @@
 smart-meter-texas==0.5.5
 aiohttp
 pytz
+certifi
+asn1
+python-dateutil
+pyOpenSSL
+tenacity
