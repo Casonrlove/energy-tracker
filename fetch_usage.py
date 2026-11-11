@@ -6,6 +6,7 @@ import smtplib
 import ssl
 import sys
 from datetime import datetime, timedelta
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -15,7 +16,7 @@ import pytz
 
 from smart_meter_texas import Account, Client
 from smart_meter_texas.const import INTERVAL_SYNCH
-from energy_usage import generate_report
+from energy_usage import generate_html, generate_report, get_stats
 
 BACKFILL_DAYS = 35
 
@@ -66,7 +67,7 @@ def append_row(esiid, usage_date, reading_kwh):
         writer.writerow(row)
 
 
-def send_email(cfg, subject, body):
+def send_email(cfg, subject, body, html):
     """Send email via Gmail SMTP."""
     gmail_user = cfg.get("gmail_user", "")
     gmail_pw = cfg.get("gmail_app_password", "")
@@ -78,7 +79,9 @@ def send_email(cfg, subject, body):
 
     recipients = [r.strip() for r in email_to.split(",") if r.strip()]
 
-    msg = MIMEText(body, "plain")
+    msg = MIMEMultipart("alternative")
+    msg.attach(MIMEText(body, "plain"))
+    msg.attach(MIMEText(html, "html"))
     msg["Subject"] = subject
     msg["From"] = gmail_user
     msg["To"] = ", ".join(recipients)
@@ -169,18 +172,14 @@ async def main():
                     log.warning(f"  {date_str}: failed to fetch ({e})")
 
     # Generate and print report
-    report = generate_report()
+    stats = get_stats()
+    report = generate_report(new_rows, stats)
     print(report)
 
     # Email unless --no-email
     if not no_email:
         today_str = datetime.now(TIMEZONE).strftime("%m/%d/%Y")
-        if new_rows:
-            added_summary = "\n".join(f"  {d}: {k:.1f} kWh" for d, k in new_rows)
-            email_body = f"New data added:\n{added_summary}\n\n{report}"
-        else:
-            email_body = f"No new data today.\n\n{report}"
-        send_email(cfg, f"Energy Report - {today_str}", email_body)
+        send_email(cfg, f"Energy Report - {today_str}", report, generate_html(new_rows, stats))
 
 
 if __name__ == "__main__":
