@@ -2,7 +2,9 @@ name: Fetch energy usage
 
 on:
   schedule:
-    - cron: "30 13 * * *"  # 13:30 UTC daily (~8:30 AM CT)
+    # SMT publishes yesterday's usage around 2 PM CT (0/152 runs before 2 PM got it, 15/16 after).
+    # 21:17 UTC = 3:17 PM CST / 4:17 PM CDT; GitHub often starts scheduled runs 1-4 h late.
+    - cron: "17 21 * * *"
   workflow_dispatch:
 
 permissions:
